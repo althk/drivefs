@@ -2,10 +2,13 @@
 package driveapi
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +20,71 @@ import (
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )
+
+const (
+	MimeTypeGoogleDoc = iota
+	MimeTypeGoogleDrawing
+	MimeTypeGoogleDriveFile
+	MimeTypeGoogleDriveFolder
+	MimeTypeGoogleForm
+	MimeTypeGoogleFusionTable
+	MimeTypeGoogleMyMap
+	MimeTypeGoogleSlide
+	MimeTypeGoogleAppsScript
+	MimeTypeShortcut
+	MimeTypeGoogleSite
+	MimeTypeGoogleSpreadsheet
+)
+
+// See https://developers.google.com/drive/api/v3/mime-types
+var googleAppsMimeTypes = map[int]string{
+	MimeTypeGoogleDoc:         "application/vnd.google-apps.document",
+	MimeTypeGoogleDrawing:     "application/vnd.google-apps.drawing",
+	MimeTypeGoogleDriveFile:   "application/vnd.google-apps.file",
+	MimeTypeGoogleDriveFolder: "application/vnd.google-apps.folder",
+	MimeTypeGoogleForm:        "application/vnd.google-apps.form",
+	MimeTypeGoogleFusionTable: "application/vnd.google-apps.fusiontable",
+	MimeTypeGoogleMyMap:       "application/vnd.google-apps.map",
+	MimeTypeGoogleSlide:       "application/vnd.google-apps.presentation",
+	MimeTypeGoogleAppsScript:  "application/vnd.google-apps.script",
+	MimeTypeShortcut:          "application/vnd.google-apps.shortcut",
+	MimeTypeGoogleSite:        "application/vnd.google-apps.site",
+	MimeTypeGoogleSpreadsheet: "application/vnd.google-apps.spreadsheet",
+}
+
+func GoogleAppsMimeTypeText(code int) string {
+	return googleAppsMimeTypes[code]
+}
+
+func InitWithConfigJSON(
+	ctx context.Context, b []byte, tokenPath string) *drive.Service {
+	config, err := google.ConfigFromJSON(b, drive.DriveScope)
+	if err != nil {
+		log.Fatalf("Unable to parse config from json: %v", err)
+	}
+	client := getClient(config, tokenPath)
+	service, err := drive.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		log.Fatalf("Unable to create Drive service: %v", err)
+	}
+	return service
+}
+
+func RootFolder(ctx context.Context, drv *drive.Service) (File, error) {
+	root, err := drv.Files.Get("root").Context(ctx).
+		Fields("id, name").Do()
+	if err != nil {
+		log.Fatalf("Error fetching root folder: %v", err)
+		return nil, err
+	}
+	return &file{
+		GD:       drv,
+		id:       root.Id,
+		name:     root.Name,
+		files:    nil,
+		mimeType: GoogleAppsMimeTypeText(MimeTypeGoogleDriveFolder),
+	}, nil
+}
 
 func tokenFromFile(path string) (*oauth2.Token, error) {
 	f, err := os.Open(path)
@@ -69,69 +137,30 @@ func getClient(config *oauth2.Config, tokenPath string) *http.Client {
 	return config.Client(context.Background(), tok)
 }
 
-const (
-	MimeTypeGoogleDoc = iota
-	MimeTypeGoogleDrawing
-	MimeTypeGoogleDriveFile
-	MimeTypeGoogleDriveFolder
-	MimeTypeGoogleForm
-	MimeTypeGoogleFusionTable
-	MimeTypeGoogleMyMap
-	MimeTypeGoogleSlide
-	MimeTypeGoogleAppsScript
-	MimeTypeShortcut
-	MimeTypeGoogleSite
-	MimeTypeGoogleSpreadsheet
-)
-
-// See https://developers.google.com/drive/api/v3/mime-types
-var googleAppsMimeTypes = map[int]string{
-	MimeTypeGoogleDoc:         "application/vnd.google-apps.document",
-	MimeTypeGoogleDrawing:     "application/vnd.google-apps.drawing",
-	MimeTypeGoogleDriveFile:   "application/vnd.google-apps.file",
-	MimeTypeGoogleDriveFolder: "application/vnd.google-apps.folder",
-	MimeTypeGoogleForm:        "application/vnd.google-apps.form",
-	MimeTypeGoogleFusionTable: "application/vnd.google-apps.fusiontable",
-	MimeTypeGoogleMyMap:       "application/vnd.google-apps.map",
-	MimeTypeGoogleSlide:       "application/vnd.google-apps.presentation",
-	MimeTypeGoogleAppsScript:  "application/vnd.google-apps.script",
-	MimeTypeShortcut:          "application/vnd.google-apps.shortcut",
-	MimeTypeGoogleSite:        "application/vnd.google-apps.site",
-	MimeTypeGoogleSpreadsheet: "application/vnd.google-apps.spreadsheet",
+type file struct {
+	GD                                       *drive.Service
+	id, name, mimeType, parentID, parentName string
+	size                                     uint64
+	content                                  []byte
+	files                                    []File
+	lsTime                                   time.Time
+	contentDownloaded                        bool
 }
 
-func GoogleAppsMimeTypeText(code int) string {
-	return googleAppsMimeTypes[code]
-}
-
-func InitWithConfigJSON(
-	ctx context.Context, b []byte, tokenPath string) *drive.Service {
-	config, err := google.ConfigFromJSON(b, drive.DriveScope)
-	if err != nil {
-		log.Fatalf("Unable to parse config from json: %v", err)
-	}
-	client := getClient(config, tokenPath)
-	service, err := drive.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		log.Fatalf("Unable to create Drive service: %v", err)
-	}
-	return service
-}
-
-func RootFolder(ctx context.Context, drv *drive.Service) File {
-	root, err := drv.Files.Get("root").Context(ctx).
-		Fields("id, name").Do()
-	if err != nil {
-		log.Fatalf("Error fetching root folder: %v", err)
-		return nil
-	}
-	return &file{
-		GD:       drv,
-		id:       root.Id,
-		name:     root.Name,
-		files:    nil,
-		mimeType: GoogleAppsMimeTypeText(MimeTypeGoogleDriveFolder),
-	}
+type File interface {
+	String() string
+	IsDir() bool
+	IsGoogleAppsFile() bool
+	ListFiles(ctx context.Context) ([]File, error)
+	Size() uint64
+	Name() string
+	MimeType() string
+	ParentID() string
+	ParentName() string
+	Content() []byte
+	Files() []File
+	ID() string
+	Download(ctx context.Context) (io.ReadCloser, error)
 }
 
 func (f *file) ListFiles(
@@ -173,30 +202,6 @@ func (f *file) ListFiles(
 	f.files = files
 	f.lsTime = time.Now()
 	return files, nil
-}
-
-type file struct {
-	GD                                       *drive.Service
-	id, name, mimeType, parentID, parentName string
-	size                                     uint64
-	content                                  []byte
-	files                                    []File
-	lsTime                                   time.Time
-}
-
-type File interface {
-	String() string
-	IsDir() bool
-	IsGoogleAppsFile() bool
-	ListFiles(ctx context.Context) ([]File, error)
-	Size() uint64
-	Name() string
-	MimeType() string
-	ParentID() string
-	ParentName() string
-	Content() []byte
-	Files() []File
-	ID() string
 }
 
 func (f *file) String() string {
@@ -243,4 +248,32 @@ func (f *file) Content() []byte {
 
 func (f *file) Files() []File {
 	return f.files
+}
+
+func (f *file) Download(ctx context.Context) (io.ReadCloser, error) {
+	if f.contentDownloaded { // TODO: add TTL logic here
+		return f.contentReader(), nil
+	}
+	r, err := f.GD.Files.Get(f.id).
+		Context(ctx).
+		Download()
+	if err != nil {
+		fmt.Printf("error downloading %s: %v\n", f.name, err)
+		return nil, err
+	}
+	defer r.Body.Close()
+	fmt.Printf("file download started for %s\n", f.name)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	f.content = make([]byte, f.size)
+	f.content = data
+	f.contentDownloaded = true
+	fmt.Printf("total downloaded bytes: %d, reported size: %d\n", len(data), f.size)
+	return f.contentReader(), nil
+}
+
+func (f *file) contentReader() io.ReadCloser {
+	return io.NopCloser(bufio.NewReader(bytes.NewReader(f.content)))
 }

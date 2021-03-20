@@ -1,7 +1,9 @@
 package fusehooks
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"reflect"
 	"testing"
@@ -69,6 +71,10 @@ func (f *mockFile) Files() []driveapi.File {
 	return f.files
 }
 
+func (f *mockFile) Download(_ context.Context) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(f.content)), nil
+}
+
 var root = &mockFile{
 	name:             "My Drive",
 	mimeType:         driveapi.GoogleAppsMimeTypeText(driveapi.MimeTypeGoogleDriveFolder),
@@ -85,16 +91,17 @@ var root = &mockFile{
 	},
 }
 
+var fileAContent = []byte("fileA contents")
 var fileA = &mockFile{
 	name:             "file-a",
 	mimeType:         "application/json",
 	parentName:       "My Drive",
 	parentID:         "id1",
 	id:               "fid2",
-	size:             10,
+	size:             uint64(len(fileAContent)),
 	isDir:            false,
 	isGoogleAppsFile: false,
-	content:          []byte{},
+	content:          fileAContent,
 	files:            []driveapi.File{},
 }
 
@@ -348,6 +355,101 @@ func TestFile_Attr(t *testing.T) {
 						tt.fields.file, tt.args.attr.Mode, 0400)
 				}
 			}
+		})
+	}
+}
+
+func TestFile_Open(t *testing.T) {
+	type fields struct {
+		file driveapi.File
+	}
+	type args struct {
+		ctx  context.Context
+		req  *fuse.OpenRequest
+		resp *fuse.OpenResponse
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		want    fs.Handle
+		wantErr bool
+	}{
+		{name: "File_Open",
+			fields: fields{
+				file: fileA,
+			},
+			args: args{
+				ctx:  context.TODO(),
+				req:  &fuse.OpenRequest{},
+				resp: &fuse.OpenResponse{},
+			},
+			want: &FileHandle{
+				io.NopCloser(bytes.NewReader(fileA.Content())),
+			},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &File{
+				file: tt.fields.file,
+			}
+			got, err := f.Open(tt.args.ctx, tt.args.req, tt.args.resp)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("File.Open() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("File.Open() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileHandle_Read(t *testing.T) {
+	type fields struct {
+		r io.ReadCloser
+	}
+	type args struct {
+		ctx  context.Context
+		req  *fuse.ReadRequest
+		resp *fuse.ReadResponse
+	}
+	tests := []struct {
+		name    string
+		fields  fields
+		args    args
+		wantErr bool
+	}{
+		{
+			name: "FileHandle_Read",
+			fields: fields{
+				r: io.NopCloser(bytes.NewReader(fileA.Content())),
+			},
+			args: args{
+				ctx: context.TODO(),
+				req: &fuse.ReadRequest{
+					Size: int(fileA.Size()),
+				},
+				resp: &fuse.ReadResponse{},
+			},
+			wantErr: false,
+		},
+		// TODO: Add test cases.
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fh := &FileHandle{
+				r: tt.fields.r,
+			}
+			if err := fh.Read(tt.args.ctx, tt.args.req, tt.args.resp); (err != nil) != tt.wantErr {
+				t.Errorf("FileHandle.Read() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !bytes.Equal(tt.args.resp.Data, fileA.Content()) {
+				t.Errorf("FileHandle.Read() => \n%q, want %q", tt.args.resp.Data, fileA.Content())
+			}
+			fh.Release(context.TODO(), &fuse.ReleaseRequest{}) // Ensure Release does not error.
 		})
 	}
 }

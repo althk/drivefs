@@ -3,6 +3,8 @@ package fusehooks
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"syscall"
 	"time"
@@ -18,18 +20,23 @@ type FS struct {
 	DriveSvc *drive.Service
 }
 
+var _ fs.FS = (*FS)(nil)
+
 func (f *FS) Root() (fs.Node, error) {
-	root := driveapi.RootFolder(f.Ctx, f.DriveSvc)
+	root, err := driveapi.RootFolder(f.Ctx, f.DriveSvc)
+	if root == nil {
+		return nil, err
+	}
 	return &Dir{
 		root,
 	}, nil
 }
 
-var _ fs.FS = (*FS)(nil)
-
 type Dir struct {
 	driveapi.File
 }
+
+var _ fs.Node = (*Dir)(nil)
 
 func (d *Dir) Attr(_ context.Context, attr *fuse.Attr) error {
 	return mapAttr(d.File, attr)
@@ -46,8 +53,6 @@ func mapAttr(f driveapi.File, a *fuse.Attr) error {
 	}
 	return nil
 }
-
-var _ fs.Node = (*Dir)(nil)
 
 var _ = fs.HandleReadDirAller(&Dir{})
 
@@ -97,8 +102,42 @@ type File struct {
 	file driveapi.File
 }
 
-func (f File) Attr(_ context.Context, attr *fuse.Attr) error {
+var _ fs.Node = (*File)(nil)
+
+func (f *File) Attr(_ context.Context, attr *fuse.Attr) error {
 	return mapAttr(f.file, attr)
 }
 
-var _ fs.Node = (*File)(nil)
+var _ = fs.NodeOpener(&File{})
+
+func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	r, err := f.file.Download(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp.Flags |= fuse.OpenKeepCache
+	return &FileHandle{r}, nil
+}
+
+type FileHandle struct {
+	r io.ReadCloser
+}
+
+var _ fs.Handle = (*FileHandle)(nil)
+
+var _ fs.HandleReleaser = (*FileHandle)(nil)
+
+func (fh *FileHandle) Release(_ context.Context, req *fuse.ReleaseRequest) error {
+	fmt.Println("file handle closed")
+	return fh.r.Close()
+}
+
+var _ = fs.HandleReader(&FileHandle{})
+
+func (fh *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	buf := make([]byte, req.Size)
+	n, err := fh.r.Read(buf)
+	fmt.Printf("read %d of %d bytes\n", n, req.Size)
+	resp.Data = buf[:n]
+	return err
+}
