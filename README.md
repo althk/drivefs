@@ -5,7 +5,9 @@ Currently supports:
 * Mounting Google Drive to a directory in READONLY mode only.
 * Opening non Google Apps files (i.e., Google Docs, Sheets etc will not open)
 * It downloads files only when opened and has support for primitive 'caching'.
-* Still in infancy mode, other features (sync, upload, etc.) will come later. Pull requests welcome!
+
+NOTE: Still in infancy mode, proper logging, doc and other features (sync, upload, etc.)
+will come later. Pull requests welcome!
 
 ### Pre-reqs
 * Golang version 1.16+
